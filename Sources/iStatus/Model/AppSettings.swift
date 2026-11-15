@@ -1,0 +1,299 @@
+import Foundation
+import AppKit
+import ServiceManagement
+
+enum MenuBarStyle: String, Codable, CaseIterable, Identifiable {
+    case iconValue
+    case valueOnly
+    case letterValue
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .iconValue: return "图标 + 数值"
+        case .valueOnly: return "仅数值"
+        case .letterValue: return "字母 + 数值"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .iconValue: return "使用 SF Symbols 图标，信息最直观"
+        case .valueOnly: return "最节省状态栏空间"
+        case .letterValue: return "不使用图标，用 C / M / G 区分模块"
+        }
+    }
+}
+
+enum TemperatureUnit: String, Codable, CaseIterable, Identifiable {
+    case celsius
+    case fahrenheit
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .celsius: return "摄氏度 °C"
+        case .fahrenheit: return "华氏度 °F"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .celsius: return "°C"
+        case .fahrenheit: return "°F"
+        }
+    }
+}
+
+enum StatusBarColorMode: String, Codable, CaseIterable, Identifiable {
+    case automatic
+    case white
+    case black
+    case custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .automatic: return "自动"
+        case .white: return "白色"
+        case .black: return "黑色"
+        case .custom: return "自选"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .automatic:
+            return "跟随系统外观：浅色用黑色，深色用白色。"
+        case .white:
+            return "始终使用白色，适合深色菜单栏或深色壁纸。"
+        case .black:
+            return "始终使用黑色，适合浅色菜单栏或浅色壁纸。"
+        case .custom:
+            return "使用下方自选颜色。"
+        }
+    }
+
+    func color(for appearance: NSAppearance, custom: StatusBarColor) -> NSColor {
+        switch self {
+        case .automatic:
+            let match = appearance.bestMatch(from: [.darkAqua, .aqua])
+            return match == .darkAqua ? .white : .black
+        case .white:
+            return .white
+        case .black:
+            return .black
+        case .custom:
+            return custom.nsColor
+        }
+    }
+}
+
+struct StatusBarColor: Codable, Equatable {
+    var red: Double = 0.23
+    var green: Double = 0.55
+    var blue: Double = 1.0
+
+    static let defaultColor = StatusBarColor()
+
+    var nsColor: NSColor {
+        NSColor(
+            srgbRed: component(red),
+            green: component(green),
+            blue: component(blue),
+            alpha: 1
+        )
+    }
+
+    private func component(_ value: Double) -> CGFloat {
+        CGFloat(min(max(value, 0), 1))
+    }
+}
+
+enum LoginItemState: Equatable {
+    case enabled
+    case disabled
+    case requiresApproval
+    case unavailable
+    case failed(String)
+
+    var isOn: Bool {
+        self == .enabled || self == .requiresApproval
+    }
+
+    var description: String {
+        switch self {
+        case .enabled:
+            return "已注册为登录项，开机后自动运行"
+        case .disabled:
+            return "尚未开启开机自启动"
+        case .requiresApproval:
+            return "需要在“系统设置 › 通用 › 登录项”中允许 iStatus"
+        case .unavailable:
+            return "请将 iStatus.app 放入“应用程序”文件夹后再开启"
+        case .failed(let message):
+            return message
+        }
+    }
+}
+
+struct AppConfig: Codable, Equatable {
+    var showCPU = true
+    var showMemory = true
+    var showGPU = true
+    var showDisk = true
+    var showNetwork = true
+    var showFan = false
+    var showTemperature = true
+
+    var menuBarStyle: MenuBarStyle = .iconValue
+    var refreshInterval: Double = 1.0
+    var temperatureUnit: TemperatureUnit = .celsius
+    var statusBarColorMode: StatusBarColorMode = .automatic
+    var customStatusBarColor: StatusBarColor = .defaultColor
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case showCPU
+        case showMemory
+        case showGPU
+        case showDisk
+        case showNetwork
+        case showFan
+        case showTemperature
+        case menuBarStyle
+        case refreshInterval
+        case temperatureUnit
+        case statusBarColorMode
+        case customStatusBarColor
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        showCPU = try container.decodeIfPresent(Bool.self, forKey: .showCPU) ?? true
+        showMemory = try container.decodeIfPresent(Bool.self, forKey: .showMemory) ?? true
+        showGPU = try container.decodeIfPresent(Bool.self, forKey: .showGPU) ?? true
+        showDisk = try container.decodeIfPresent(Bool.self, forKey: .showDisk) ?? true
+        showNetwork = try container.decodeIfPresent(Bool.self, forKey: .showNetwork) ?? true
+        showFan = try container.decodeIfPresent(Bool.self, forKey: .showFan) ?? false
+        showTemperature = try container.decodeIfPresent(Bool.self, forKey: .showTemperature) ?? true
+        menuBarStyle = try container.decodeIfPresent(MenuBarStyle.self, forKey: .menuBarStyle) ?? .iconValue
+        refreshInterval = try container.decodeIfPresent(Double.self, forKey: .refreshInterval) ?? 1.0
+        temperatureUnit = try container.decodeIfPresent(TemperatureUnit.self, forKey: .temperatureUnit) ?? .celsius
+        statusBarColorMode = try container.decodeIfPresent(StatusBarColorMode.self, forKey: .statusBarColorMode) ?? .automatic
+        customStatusBarColor = try container.decodeIfPresent(StatusBarColor.self, forKey: .customStatusBarColor) ?? .defaultColor
+    }
+
+    subscript(module: MetricModule) -> Bool {
+        get {
+            switch module {
+            case .cpu: return showCPU
+            case .memory: return showMemory
+            case .gpu: return showGPU
+            case .disk: return showDisk
+            case .network: return showNetwork
+            case .fan: return showFan
+            case .temperature: return showTemperature
+            }
+        }
+        set {
+            switch module {
+            case .cpu: showCPU = newValue
+            case .memory: showMemory = newValue
+            case .gpu: showGPU = newValue
+            case .disk: showDisk = newValue
+            case .network: showNetwork = newValue
+            case .fan: showFan = newValue
+            case .temperature: showTemperature = newValue
+            }
+        }
+    }
+}
+
+final class AppSettings: ObservableObject {
+    @Published var config: AppConfig {
+        didSet {
+            guard oldValue != config else { return }
+            save()
+            onChange?()
+        }
+    }
+
+    @Published private(set) var loginItemState: LoginItemState = .disabled
+    @Published private(set) var loginError: String?
+
+    /// Called after a persisted setting changed.
+    var onChange: (() -> Void)?
+
+    private static let defaultsKey = "com.linimbus.istatus.config.v1"
+
+    init() {
+        if let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
+           let decoded = try? JSONDecoder().decode(AppConfig.self, from: data) {
+            config = decoded
+        } else {
+            config = AppConfig()
+        }
+        refreshLoginItemState()
+    }
+
+    func refreshLoginItemState() {
+        guard Self.isBundledApp else {
+            loginItemState = .unavailable
+            return
+        }
+
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            loginItemState = .enabled
+        case .requiresApproval:
+            loginItemState = .requiresApproval
+        case .notFound:
+            // Can happen before the first registration (and for apps outside /Applications).
+            // Let the user try; register() reports a concrete error if the bundle is unusable.
+            loginItemState = .disabled
+        case .notRegistered:
+            loginItemState = .disabled
+        @unknown default:
+            loginItemState = .disabled
+        }
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        guard Self.isBundledApp else {
+            loginItemState = .unavailable
+            return
+        }
+
+        loginError = nil
+        do {
+            if enabled {
+                if SMAppService.mainApp.status != .enabled {
+                    try SMAppService.mainApp.register()
+                }
+            } else if SMAppService.mainApp.status != .notRegistered {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            loginError = error.localizedDescription
+        }
+        refreshLoginItemState()
+    }
+
+    func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(config) else { return }
+        UserDefaults.standard.set(data, forKey: Self.defaultsKey)
+    }
+
+    private static var isBundledApp: Bool {
+        Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.bundleIdentifier != nil
+    }
+}

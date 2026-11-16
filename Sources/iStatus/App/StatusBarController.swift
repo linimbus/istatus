@@ -23,19 +23,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let warning: WarningLevel
     }
 
-    private struct ModuleEntry {
-        let item: NSStatusItem
-        let view: StatusItemView
-    }
-
     private let settings: AppSettings
     private let monitor: SystemMonitor
 
-    private var mainItem: NSStatusItem?
-    private var mainView: StatusItemView?
-    private var moduleItems: [MetricModule: ModuleEntry] = [:]
-    private var appliedStyle: MenuBarStyle?
-    private var anchorTag: Int?
+    private var mergedItem: NSStatusItem?
+    private var mergedView: StatusItemView?
     private var appearanceObservation: NSKeyValueObservation?
     private var themeObserver: NSObjectProtocol?
     private var activationObserver: NSObjectProtocol?
@@ -50,7 +42,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         self.monitor = monitor
         super.init()
 
-        setupMainItem()
+        setupItem()
         setupPopover()
         observeAppearance()
         applySettings()
@@ -73,40 +65,14 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     // MARK: - Public
 
     func applySettings() {
-        for module in MetricModule.allCases.reversed() {
-            let enabled = settings.config[module]
-            if enabled {
-                if moduleItems[module] == nil {
-                    createItem(for: module)
-                }
-            } else if let entry = moduleItems.removeValue(forKey: module) {
-                NSStatusBar.system.removeStatusItem(entry.item)
-            }
-        }
-
-        if appliedStyle != settings.config.menuBarStyle {
-            appliedStyle = settings.config.menuBarStyle
-            for (module, entry) in moduleItems {
-                let width = length(for: module, style: settings.config.menuBarStyle)
-                entry.item.length = width
-                entry.view.frame = NSRect(
-                    x: 0,
-                    y: 0,
-                    width: width,
-                    height: entry.view.frame.height > 0 ? entry.view.frame.height : 22
-                )
-            }
-        }
-
         updateTitles()
     }
 
     func showPanel() {
-        guard let mainView else { return }
-        anchorTag = 100
+        guard let view = mergedView else { return }
         monitor.refresh()
         NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: mainView.bounds, of: mainView, preferredEdge: .minY)
+        popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
     }
 
     func closePanel() {
@@ -115,50 +81,26 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     // MARK: - Setup
 
-    private func setupMainItem() {
-        let item = NSStatusBar.system.statusItem(withLength: 28)
-        item.autosaveName = "iStatus.main"
-
-        let view = StatusItemView()
-        view.itemTag = 100
-        view.symbolPointSize = 14
-        view.toolTip = "iStatus — 点击查看全局状态"
-        view.setAccessibilityLabel("iStatus 系统状态")
-        view.onClick = { [weak self, weak view] in
-            guard let self, let view else { return }
-            self.togglePopover(anchor: view)
-        }
-        view.onRightClick = { [weak self, weak view] in
-            guard let self, let view else { return }
-            self.showContextMenu(anchor: view)
-        }
-
-        item.view = view
-        mainItem = item
-        mainView = view
+    private var barHeight: CGFloat {
+        max(22, NSStatusBar.system.thickness)
     }
 
-    private func createItem(for module: MetricModule) {
-        let style = settings.config.menuBarStyle
-        let width = length(for: module, style: style)
-        let item = NSStatusBar.system.statusItem(withLength: width)
-        item.autosaveName = "iStatus.module.\(module.rawValue)"
+    private func setupItem() {
+        let height = barHeight
+        let item = NSStatusBar.system.statusItem(withLength: 80)
+        item.autosaveName = "iStatus.merged"
 
-        let view = StatusItemView(frame: NSRect(x: 0, y: 0, width: width, height: 22))
-        view.itemTag = module.menuTag
-        view.symbolPointSize = 11
-        view.setAccessibilityLabel(module.title)
-        view.onClick = { [weak self, weak view] in
-            guard let self, let view else { return }
-            self.togglePopover(anchor: view)
+        let view = StatusItemView(frame: NSRect(x: 0, y: 0, width: 80, height: height))
+        view.onClick = { [weak self] in
+            self?.togglePopover()
         }
-        view.onRightClick = { [weak self, weak view] in
-            guard let self, let view else { return }
-            self.showContextMenu(anchor: view)
+        view.onRightClick = { [weak self] in
+            self?.showContextMenu()
         }
 
         item.view = view
-        moduleItems[module] = ModuleEntry(item: item, view: view)
+        mergedItem = item
+        mergedView = view
     }
 
     private func setupPopover() {
@@ -177,28 +119,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.behavior = .transient
         popover.animates = false
         popover.delegate = self
-    }
-
-    /// Fixed widths are essential: changing CPU/network values must never resize
-    /// the status item or move neighboring menu bar items.
-    private func length(for module: MetricModule, style: MenuBarStyle) -> CGFloat {
-        switch style {
-        case .iconValue:
-            switch module {
-            case .network: return 96
-            case .cpu, .memory, .gpu, .disk, .fan, .temperature: return 48
-            }
-        case .valueOnly:
-            switch module {
-            case .network: return 80
-            case .cpu, .memory, .gpu, .disk, .fan, .temperature: return 32
-            }
-        case .letterValue:
-            switch module {
-            case .network: return 94
-            case .cpu, .memory, .gpu, .disk, .fan, .temperature: return 46
-            }
-        }
     }
 
     // MARK: - Appearance
@@ -231,30 +151,27 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func appearanceChanged() {
-        for entry in moduleItems.values {
-            entry.view.needsDisplay = true
-        }
-        mainView?.needsDisplay = true
+        mergedView?.needsDisplay = true
         updateTitles()
         popover.contentViewController?.view.needsDisplay = true
     }
 
     // MARK: - Actions
 
-    private func togglePopover(anchor: StatusItemView) {
+    private func togglePopover() {
+        guard let view = mergedView else { return }
         if popover.isShown {
-            let sameAnchor = anchorTag == anchor.itemTag
             popover.performClose(nil)
-            if sameAnchor { return }
+            return
         }
 
-        anchorTag = anchor.itemTag
         monitor.refresh()
         NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
     }
 
-    private func showContextMenu(anchor: StatusItemView) {
+    private func showContextMenu() {
+        guard let view = mergedView else { return }
         let menu = NSMenu()
 
         let panel = NSMenuItem(title: "打开全局面板", action: #selector(menuOpenPanel), keyEquivalent: "")
@@ -272,12 +189,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         menu.addItem(quitItem)
 
         if let event = NSApp.currentEvent {
-            NSMenu.popUpContextMenu(menu, with: event, for: anchor)
+            NSMenu.popUpContextMenu(menu, with: event, for: view)
         } else {
             menu.popUp(
                 positioning: nil,
-                at: NSPoint(x: 0, y: anchor.bounds.height),
-                in: anchor
+                at: NSPoint(x: 0, y: view.bounds.height),
+                in: view
             )
         }
     }
@@ -325,10 +242,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         return NSAppearance(named: name)
     }
 
-    func popoverDidClose(_ notification: Notification) {
-        anchorTag = nil
-    }
-
     // MARK: - Title rendering
 
     private var baseColor: NSColor {
@@ -339,33 +252,53 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func updateTitles() {
-        let base = baseColor
+        guard let view = mergedView, let item = mergedItem else { return }
 
-        for (module, entry) in moduleItems {
+        let base = baseColor
+        let style = settings.config.menuBarStyle
+        var segments: [StatusItemView.Segment] = []
+        var summary: [String] = []
+
+        for module in MetricModule.allCases where settings.config[module] {
             let payload = payload(for: module)
-            let tint = payload.warning.color ?? base
-            let prefix = settings.config.menuBarStyle == .letterValue
-                ? module.letter + " "
-                : nil
-            let symbol = settings.config.menuBarStyle == .iconValue
-                ? module.symbol
-                : nil
-            entry.view.update(
-                symbolName: symbol,
-                prefix: prefix,
-                value: payload.value,
-                tint: tint,
-                tooltip: payload.tooltip
+            let showsSlot = style != .valueOnly && settings.config.showsIcon(module)
+            segments.append(
+                StatusItemView.Segment(
+                    symbolName: showsSlot && style == .iconValue ? module.symbol : nil,
+                    letter: showsSlot && style == .letterValue ? module.letter : nil,
+                    value: payload.value,
+                    tint: payload.warning.color ?? base,
+                    accessibilityLabel: module.title
+                )
+            )
+            summary.append(
+                "\(module.title) \(payload.value.trimmingCharacters(in: .whitespaces))"
             )
         }
 
-        mainView?.update(
-            symbolName: "gauge.with.dots.needle.50percent",
-            prefix: nil,
-            value: "",
-            tint: base,
-            tooltip: "iStatus — 点击查看全局状态"
+        let tooltip = summary.isEmpty
+            ? "iStatus — 点击打开全局面板；右键打开菜单"
+            : "iStatus · " + summary.joined(separator: " · ")
+
+        view.update(
+            segments: segments,
+            iconPosition: settings.config.iconPosition,
+            mainIconVisible: settings.config.showMainIcon,
+            mainTint: base,
+            tooltip: tooltip
         )
+
+        let width = view.preferredWidth
+        guard width > 0 else {
+            item.isVisible = false
+            return
+        }
+
+        item.isVisible = true
+        if abs(item.length - width) > 0.5 {
+            item.length = width
+            view.frame = NSRect(x: 0, y: 0, width: width, height: barHeight)
+        }
     }
 
     private func payload(for module: MetricModule) -> Payload {

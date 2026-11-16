@@ -19,9 +19,45 @@ enum MenuBarStyle: String, Codable, CaseIterable, Identifiable {
 
     var hint: String {
         switch self {
-        case .iconValue: return "使用 SF Symbols 图标，信息最直观"
-        case .valueOnly: return "最节省状态栏空间"
-        case .letterValue: return "不使用图标，用 C / M / G 区分模块"
+        case .iconValue: return "每个模块使用 SF Symbols 图标，可逐项关闭"
+        case .valueOnly: return "只显示数值，不显示图标或字母"
+        case .letterValue: return "用 C / M / G 等字母代替图标，可逐项关闭"
+        }
+    }
+}
+
+enum MenuBarIconPosition: String, Codable, CaseIterable, Identifiable {
+    case top
+    case bottom
+    case left
+    case right
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .top: return "上"
+        case .bottom: return "下"
+        case .left: return "左"
+        case .right: return "右"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .top: return "图标/字母显示在数值上方"
+        case .bottom: return "图标/字母显示在数值下方"
+        case .left: return "图标/字母显示在数值左侧"
+        case .right: return "图标/字母显示在数值右侧"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .top: return "arrow.up"
+        case .bottom: return "arrow.down"
+        case .left: return "arrow.left"
+        case .right: return "arrow.right"
         }
     }
 }
@@ -148,14 +184,25 @@ struct AppConfig: Codable, Equatable {
     var showNetwork = true
     var showFan = false
     var showTemperature = true
+    var showMainIcon = true
 
     var menuBarStyle: MenuBarStyle = .iconValue
+    var iconPosition: MenuBarIconPosition = .top
+    var moduleIcons: [String: Bool] = [:]
     var refreshInterval: Double = 1.0
     var temperatureUnit: TemperatureUnit = .celsius
     var statusBarColorMode: StatusBarColorMode = .automatic
     var customStatusBarColor: StatusBarColor = .defaultColor
 
     init() {}
+
+    func showsIcon(_ module: MetricModule) -> Bool {
+        moduleIcons[module.rawValue] ?? true
+    }
+
+    mutating func setShowsIcon(_ show: Bool, for module: MetricModule) {
+        moduleIcons[module.rawValue] = show
+    }
 
     private enum CodingKeys: String, CodingKey {
         case showCPU
@@ -165,7 +212,10 @@ struct AppConfig: Codable, Equatable {
         case showNetwork
         case showFan
         case showTemperature
+        case showMainIcon
         case menuBarStyle
+        case iconPosition
+        case moduleIcons
         case refreshInterval
         case temperatureUnit
         case statusBarColorMode
@@ -181,7 +231,10 @@ struct AppConfig: Codable, Equatable {
         showNetwork = try container.decodeIfPresent(Bool.self, forKey: .showNetwork) ?? true
         showFan = try container.decodeIfPresent(Bool.self, forKey: .showFan) ?? false
         showTemperature = try container.decodeIfPresent(Bool.self, forKey: .showTemperature) ?? true
+        showMainIcon = try container.decodeIfPresent(Bool.self, forKey: .showMainIcon) ?? true
         menuBarStyle = try container.decodeIfPresent(MenuBarStyle.self, forKey: .menuBarStyle) ?? .iconValue
+        iconPosition = try container.decodeIfPresent(MenuBarIconPosition.self, forKey: .iconPosition) ?? .top
+        moduleIcons = try container.decodeIfPresent([String: Bool].self, forKey: .moduleIcons) ?? [:]
         refreshInterval = try container.decodeIfPresent(Double.self, forKey: .refreshInterval) ?? 1.0
         temperatureUnit = try container.decodeIfPresent(TemperatureUnit.self, forKey: .temperatureUnit) ?? .celsius
         statusBarColorMode = try container.decodeIfPresent(StatusBarColorMode.self, forKey: .statusBarColorMode) ?? .automatic

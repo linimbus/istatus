@@ -65,12 +65,16 @@ struct SettingsView: View {
 
     private var modulesSection: some View {
         SettingsSection(title: "状态栏显示") {
-            VStack(spacing: 0) {
-                ForEach(Array(MetricModule.allCases.enumerated()), id: \.element.id) { index, module in
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ],
+                alignment: .leading,
+                spacing: 8
+            ) {
+                ForEach(MetricModule.allCases) { module in
                     ModuleRow(module: module, settings: settings)
-                    if index < MetricModule.allCases.count - 1 {
-                        Divider().opacity(0.45)
-                    }
                 }
             }
         }
@@ -93,32 +97,144 @@ struct SettingsView: View {
                     .font(.system(size: 9.5))
                     .foregroundStyle(.tertiary)
 
-                Text(previewText)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(Color.primary.opacity(0.05))
-                    )
+                barPreview
+
+                Divider().opacity(0.45)
+
+                HStack(spacing: 6) {
+                    Text("图标/文字位置")
+                        .font(.system(size: 10, weight: .medium))
+                    Spacer(minLength: 0)
+                    Text(settings.config.iconPosition.hint)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+
+                Picker("", selection: $settings.config.iconPosition) {
+                    ForEach(MenuBarIconPosition.allCases) { position in
+                        Label(position.title, systemImage: position.symbolName)
+                            .tag(position)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(settings.config.menuBarStyle == .valueOnly)
+                .opacity(settings.config.menuBarStyle == .valueOnly ? 0.5 : 1)
+
+                if settings.config.menuBarStyle == .valueOnly {
+                    Text("“仅数值”模式不显示图标或字母，位置设置暂不生效。")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider().opacity(0.45)
+
+                Toggle(isOn: $settings.config.showMainIcon) {
+                    HStack(spacing: 9) {
+                        Image(systemName: "gauge.with.dots.needle.50percent")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(AppTheme.blue)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("显示默认仪表图标")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("显示在合并状态项最左侧；点击任意位置均可打开全局面板")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+
+                if !settings.config.showMainIcon {
+                    Text("默认图标已关闭；仍可点击合并状态项或右键菜单打开全局面板。")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
 
-    private var previewText: String {
-        var parts: [String] = []
-        for module in MetricModule.allCases where settings.config[module] {
-            let value = previewValue(for: module)
-            if settings.config.menuBarStyle == .letterValue {
-                parts.append("\(module.letter) \(value)")
-            } else {
-                parts.append(value)
+    /// A small preview that mirrors the merged status item, including the icon
+    /// position and per-module icon switches.
+    private var barPreview: some View {
+        HStack(spacing: 7) {
+            if settings.config.showMainIcon {
+                Image(systemName: "gauge.with.dots.needle.50percent")
+                    .font(.system(size: 9, weight: .regular))
             }
+
+            ForEach(MetricModule.allCases) { module in
+                if settings.config[module] {
+                    previewCell(for: module)
+                }
+            }
+
+            if !settings.config.showMainIcon && MetricModule.allCases.allSatisfy({ !settings.config[$0] }) {
+                Text("没有启用的状态栏项目")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+
+            Spacer(minLength: 0)
         }
-        return parts.isEmpty ? "未选择状态栏模块" : parts.joined(separator: "   ")
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.primary.opacity(0.05))
+        )
+    }
+
+    @ViewBuilder
+    private func previewCell(for module: MetricModule) -> some View {
+        let style = settings.config.menuBarStyle
+        let showsSlot = style != .valueOnly && settings.config.showsIcon(module)
+        let value = Text(previewValue(for: module))
+            .font(.system(size: 8, weight: .medium, design: .monospaced))
+
+        if showsSlot {
+            if style == .letterValue {
+                arrangedPreview(
+                    slot: AnyView(
+                        Text(module.letter)
+                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    ),
+                    value: value
+                )
+            } else {
+                arrangedPreview(
+                    slot: AnyView(
+                        Image(systemName: module.symbol)
+                            .font(.system(size: 8, weight: .regular))
+                    ),
+                    value: value
+                )
+            }
+        } else {
+            value
+        }
+    }
+
+    private func arrangedPreview(slot: AnyView, value: Text) -> some View {
+        switch settings.config.iconPosition {
+        case .top:
+            return AnyView(VStack(spacing: 0) { slot; value })
+        case .bottom:
+            return AnyView(VStack(spacing: 0) { value; slot })
+        case .left:
+            return AnyView(HStack(spacing: 2) { slot; value })
+        case .right:
+            return AnyView(HStack(spacing: 2) { value; slot })
+        }
     }
 
     private func previewValue(for module: MetricModule) -> String {
@@ -370,7 +486,7 @@ struct SettingsView: View {
                     .font(.system(size: 9.5))
                     .foregroundStyle(.secondary)
 
-                Text("点击状态栏图标打开全局面板；右键任一状态项可快速打开设置或退出。")
+                Text("点击合并后的状态栏项打开全局面板；右键可快速打开设置或退出。")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
             }
@@ -382,27 +498,77 @@ private struct ModuleRow: View {
     let module: MetricModule
     @ObservedObject var settings: AppSettings
 
-    var body: some View {
-        Toggle(isOn: Binding(
+    private var enabled: Bool {
+        settings.config[module]
+    }
+
+    private var iconLabel: String {
+        settings.config.menuBarStyle == .letterValue ? "显示字母" : "显示图标"
+    }
+
+    private var iconToggleDisabled: Bool {
+        !enabled || settings.config.menuBarStyle == .valueOnly
+    }
+
+    private var enabledBinding: Binding<Bool> {
+        Binding(
             get: { settings.config[module] },
             set: { settings.config[module] = $0 }
-        )) {
-            HStack(spacing: 10) {
-                Image(systemName: module.symbol)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(AppTheme.blue)
-                    .frame(width: 19)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(module.title)
-                        .font(.system(size: 11, weight: .medium))
-                    Text(module.subtitle)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
+        )
+    }
+
+    private var iconBinding: Binding<Bool> {
+        Binding(
+            get: { settings.config.showsIcon(module) },
+            set: { settings.config.setShowsIcon($0, for: module) }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Toggle(isOn: enabledBinding) {
+                HStack(spacing: 7) {
+                    Image(systemName: module.symbol)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(AppTheme.blue)
+                        .frame(width: 15)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(module.title)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .lineLimit(1)
+                        Text(module.subtitle)
+                            .font(.system(size: 8))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
                 }
             }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+
+            Toggle(isOn: iconBinding) {
+                Text(iconLabel)
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.mini)
+            .disabled(iconToggleDisabled)
+            .opacity(iconToggleDisabled ? 0.8 : 1)
+            .padding(.leading, 22)
         }
-        .toggleStyle(.switch)
-        .controlSize(.small)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.primary.opacity(enabled ? 0.06 : 0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(Color.primary.opacity(enabled ? 0.10 : 0.05), lineWidth: 1)
+        )
     }
 }

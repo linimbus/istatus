@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 
 /// A self-drawn status item view that renders every enabled module in one item.
 ///
@@ -9,6 +10,11 @@ import AppKit
 ///
 /// Each module is a segment with its own icon/letter, value and warning color.
 /// The icon/letter slot can be placed above, below, left or right of the value.
+///
+/// A status item is 22 pt tall, but the menu bar window is taller (24–30 pt) and
+/// the item is vertically centered inside it. Drawing into that extra space lets
+/// large text and icons use the full menu bar height instead of being clipped at
+/// the item's bounds.
 final class StatusItemView: NSView {
     struct Segment {
         let symbolName: String?
@@ -21,10 +27,23 @@ final class StatusItemView: NSView {
     var onClick: (() -> Void)?
     var onRightClick: (() -> Void)?
 
-    private let valueFont = NSFont.monospacedSystemFont(ofSize: 9, weight: .medium)
-    private let letterFont = NSFont.monospacedSystemFont(ofSize: 8.5, weight: .medium)
-    private let mainPointSize: CGFloat = 13
-    private let modulePointSize: CGFloat = 8
+    private let mainSymbolName = "gauge.with.dots.needle.50percent"
+
+    private var valueFontSize: CGFloat = 9
+    private var iconPointSize: CGFloat = 8
+    private var mainPointSize: CGFloat = 13
+    private var effectiveMainPointSize: CGFloat = 13
+    private var effectiveIconPointSize: CGFloat = 8
+    private var effectiveLetterFontSize: CGFloat = 8.5
+    private var valueGlyphHeight: CGFloat = 7
+
+    private var valueFont: NSFont {
+        NSFont.monospacedSystemFont(ofSize: valueFontSize, weight: .medium)
+    }
+
+    private var letterFont: NSFont {
+        NSFont.monospacedSystemFont(ofSize: effectiveLetterFontSize, weight: .medium)
+    }
 
     private let outerPadding: CGFloat = 4
     private let segmentGap: CGFloat = 7
@@ -37,7 +56,9 @@ final class StatusItemView: NSView {
     private var mainTint: NSColor = .labelColor
     private var isPressed = false
     private var lastSignature = ""
+    private var lastSizingSignature = ""
     private var cachedSymbols: [String: NSImage] = [:]
+    private var inkHeightCache: [String: CGFloat] = [:]
 
     override var isFlipped: Bool { false }
 
@@ -61,6 +82,32 @@ final class StatusItemView: NSView {
         setAccessibilityLabel("iStatus 系统状态")
     }
 
+    // MARK: - Layout geometry
+
+    /// The status bar window is taller than the item view. Fall back to the view
+    /// height while the item is not attached to its window yet (offscreen tests).
+    private var layoutHeight: CGFloat {
+        if let height = window?.frame.height, height > bounds.height + 0.5 {
+            return height
+        }
+        return bounds.height
+    }
+
+    private var verticalPadding: CGFloat {
+        max(0, (layoutHeight - bounds.height) / 2)
+    }
+
+    /// The full drawing band, including the menu bar space above and below the
+    /// item's own bounds.
+    private var contentBand: NSRect {
+        NSRect(
+            x: 0,
+            y: -verticalPadding,
+            width: bounds.width,
+            height: layoutHeight
+        )
+    }
+
     // MARK: - Update
 
     func update(
@@ -68,12 +115,16 @@ final class StatusItemView: NSView {
         iconPosition: MenuBarIconPosition,
         mainIconVisible: Bool,
         mainTint: NSColor,
+        fontSize: CGFloat,
+        iconSize: CGFloat,
+        mainIconSize: CGFloat,
         tooltip: String
     ) {
         let signature = segments
             .map { "\($0.symbolName ?? "")|\($0.letter ?? "")|\($0.value)|\($0.tint.description)" }
             .joined(separator: ";")
             + "|\(iconPosition.rawValue)|\(mainIconVisible)|\(mainTint.description)"
+            + "|\(fontSize)|\(iconSize)|\(mainIconSize)"
 
         let changed = signature != lastSignature
         lastSignature = signature
@@ -81,6 +132,26 @@ final class StatusItemView: NSView {
         self.iconPosition = iconPosition
         self.mainIconVisible = mainIconVisible
         self.mainTint = mainTint
+        self.valueFontSize = fontSize
+        self.iconPointSize = iconSize
+        self.mainPointSize = mainIconSize
+
+        let bandHeight = layoutHeight
+        let sizingSignature = "\(iconPosition.rawValue)|\(fontSize)|\(iconSize)|\(mainIconSize)|\(mainIconVisible)|\(bandHeight)|"
+            + segments.map { "\($0.symbolName ?? "")|\($0.letter ?? "")" }.joined(separator: ";")
+        let sizingChanged = sizingSignature != lastSizingSignature
+        if sizingChanged {
+            lastSizingSignature = sizingSignature
+            valueGlyphHeight = Self.glyphHeight(
+                of: NSAttributedString(
+                    string: "↓999M ↑999M",
+                    attributes: [.font: valueFont]
+                )
+            )
+            effectiveIconPointSize = fittedIconPointSize(band: bandHeight)
+            effectiveLetterFontSize = fittedLetterFontSize(band: bandHeight)
+            effectiveMainPointSize = fittedMainPointSize(band: bandHeight)
+        }
 
         if self.toolTip != tooltip {
             self.toolTip = tooltip
@@ -94,9 +165,85 @@ final class StatusItemView: NSView {
             setAccessibilityValue(valueText)
         }
 
-        if changed {
+        if changed || sizingChanged {
             needsDisplay = true
         }
+    }
+
+    // MARK: - Size fitting
+
+    private func fittedIconPointSize(band: CGFloat) -> CGFloat {
+        guard segments.contains(where: { $0.symbolName != nil }) else {
+            return iconPointSize
+        }
+
+        let available: CGFloat
+        switch iconPosition {
+        case .top, .bottom:
+            available = band - 1 - valueGlyphHeight - verticalGap
+        case .left, .right:
+            available = band - 1
+        }
+        guard available > 4 else { return 4 }
+
+        var size = min(iconPointSize, 64)
+        while size > 4, maximumSymbolInkHeight(at: size) > available {
+            size -= 0.5
+        }
+        return size
+    }
+
+    private func fittedLetterFontSize(band: CGFloat) -> CGFloat {
+        let requested = max(6, valueFontSize - 0.5)
+        guard segments.contains(where: { ($0.letter ?? "").isEmpty == false }) else {
+            return requested
+        }
+
+        let available: CGFloat
+        switch iconPosition {
+        case .top, .bottom:
+            available = band - 1 - valueGlyphHeight - verticalGap
+        case .left, .right:
+            available = band - 1
+        }
+        guard available > 4 else { return 4 }
+
+        var size = requested
+        while size > 4, letterHeight(at: size) > available {
+            size -= 0.5
+        }
+        return size
+    }
+
+    private func fittedMainPointSize(band: CGFloat) -> CGFloat {
+        guard mainIconVisible else { return mainPointSize }
+
+        var size = min(mainPointSize, 64)
+        let available = max(4, band - 1)
+        while size > 4, symbolInkHeight(named: mainSymbolName, pointSize: size) > available {
+            size -= 0.5
+        }
+        return size
+    }
+
+    private func maximumSymbolInkHeight(at pointSize: CGFloat) -> CGFloat {
+        var height: CGFloat = 0
+        for segment in segments {
+            guard let name = segment.symbolName else { continue }
+            height = max(height, symbolInkHeight(named: name, pointSize: pointSize))
+        }
+        return height
+    }
+
+    private func letterHeight(at pointSize: CGFloat) -> CGFloat {
+        Self.glyphHeight(
+            of: NSAttributedString(
+                string: "M",
+                attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: pointSize, weight: .medium)
+                ]
+            )
+        )
     }
 
     /// Width needed to render every segment without clipping. Values use fixed-width
@@ -135,13 +282,14 @@ final class StatusItemView: NSView {
             ).fill()
         }
 
+        let band = contentBand
         var x = outerPadding
         var hasContent = false
 
         if mainIconVisible, let image = mainImage() {
             let rect = NSRect(
                 x: x,
-                y: (bounds.height - image.size.height) / 2,
+                y: band.midY - image.size.height / 2,
                 width: image.size.width,
                 height: image.size.height
             )
@@ -155,7 +303,7 @@ final class StatusItemView: NSView {
                 x += segmentGap
             }
             let width = cellWidth(for: segment)
-            draw(segment, in: NSRect(x: x, y: 0, width: width, height: bounds.height))
+            draw(segment, in: NSRect(x: x, y: band.minY, width: width, height: band.height))
             x += width
             hasContent = true
         }
@@ -163,98 +311,88 @@ final class StatusItemView: NSView {
 
     private func draw(_ segment: Segment, in rect: NSRect) {
         let value = attributedValue(segment)
-        let valueSize = value.size()
+        let lineSize = value.size()
         let slot = slotContent(for: segment)
-        let slotSize = slot?.size ?? .zero
 
         guard let slot else {
-            draw(value, size: valueSize, centeredIn: rect)
+            draw(
+                value,
+                size: lineSize,
+                at: NSPoint(
+                    x: rect.midX - lineSize.width / 2,
+                    y: rect.midY - lineSize.height / 2
+                )
+            )
             return
         }
 
         switch iconPosition {
         case .top:
-            // Slot above, value below.
-            let contentHeight = slotSize.height + verticalGap + valueSize.height
+            let contentHeight = valueGlyphHeight + verticalGap + slot.layoutHeight
             let y = rect.minY + max(0, (rect.height - contentHeight) / 2)
             draw(
                 value,
-                size: valueSize,
-                at: NSPoint(x: rect.midX - valueSize.width / 2, y: y)
+                size: lineSize,
+                at: NSPoint(
+                    x: rect.midX - lineSize.width / 2,
+                    y: y + valueGlyphHeight / 2 - lineSize.height / 2
+                )
             )
             slot.draw(
-                at: NSPoint(
-                    x: rect.midX - slotSize.width / 2,
-                    y: y + valueSize.height + verticalGap
+                centeredAt: NSPoint(
+                    x: rect.midX,
+                    y: y + valueGlyphHeight + verticalGap + slot.layoutHeight / 2
                 )
             )
 
         case .bottom:
-            // Slot below, value above.
-            let contentHeight = slotSize.height + verticalGap + valueSize.height
+            let contentHeight = valueGlyphHeight + verticalGap + slot.layoutHeight
             let y = rect.minY + max(0, (rect.height - contentHeight) / 2)
             slot.draw(
-                at: NSPoint(x: rect.midX - slotSize.width / 2, y: y)
+                centeredAt: NSPoint(x: rect.midX, y: y + slot.layoutHeight / 2)
             )
             draw(
                 value,
-                size: valueSize,
+                size: lineSize,
                 at: NSPoint(
-                    x: rect.midX - valueSize.width / 2,
-                    y: y + slotSize.height + verticalGap
+                    x: rect.midX - lineSize.width / 2,
+                    y: y + slot.layoutHeight + verticalGap + valueGlyphHeight / 2 - lineSize.height / 2
                 )
             )
 
         case .left:
-            let contentWidth = slotSize.width + inlineGap + valueSize.width
+            let slotSize = slot.drawSize
+            let contentWidth = slotSize.width + inlineGap + lineSize.width
             let x = rect.minX + max(0, (rect.width - contentWidth) / 2)
-            slot.draw(
-                at: NSPoint(
-                    x: x,
-                    y: rect.midY - slotSize.height / 2
-                )
-            )
+            slot.draw(centeredAt: NSPoint(x: x + slotSize.width / 2, y: rect.midY))
             // The fixed-width value may start with spaces. Shift the box left by
             // that blank width so the visible gap after the icon stays constant.
             let leading = leadingSpaceWidth(of: segment.value, font: valueFont)
             draw(
                 value,
-                size: valueSize,
+                size: lineSize,
                 at: NSPoint(
                     x: x + slotSize.width + inlineGap - leading,
-                    y: rect.midY - valueSize.height / 2
+                    y: rect.midY - lineSize.height / 2
                 )
             )
 
         case .right:
-            let contentWidth = valueSize.width + inlineGap + slotSize.width
+            let slotSize = slot.drawSize
+            let contentWidth = lineSize.width + inlineGap + slotSize.width
             let x = rect.minX + max(0, (rect.width - contentWidth) / 2)
             draw(
                 value,
-                size: valueSize,
-                at: NSPoint(
-                    x: x,
-                    y: rect.midY - valueSize.height / 2
-                )
+                size: lineSize,
+                at: NSPoint(x: x, y: rect.midY - lineSize.height / 2)
             )
             slot.draw(
-                at: NSPoint(
-                    x: x + valueSize.width + inlineGap,
-                    y: rect.midY - slotSize.height / 2
+                centeredAt: NSPoint(
+                    x: x + lineSize.width + inlineGap + slotSize.width / 2,
+                    y: rect.midY
                 )
             )
         }
-    }
-
-    private func draw(_ text: NSAttributedString, size: NSSize, centeredIn rect: NSRect) {
-        draw(
-            text,
-            size: size,
-            at: NSPoint(
-                x: rect.midX - size.width / 2,
-                y: rect.midY - size.height / 2
-            )
-        )
     }
 
     private func draw(_ text: NSAttributedString, size: NSSize, at origin: NSPoint) {
@@ -278,9 +416,9 @@ final class StatusItemView: NSView {
 
         switch iconPosition {
         case .top, .bottom:
-            return max(valueWidth, slot.size.width)
+            return max(valueWidth, slot.drawSize.width)
         case .left, .right:
-            return slot.size.width + inlineGap + valueWidth
+            return slot.drawSize.width + inlineGap + valueWidth
         }
     }
 
@@ -309,32 +447,40 @@ final class StatusItemView: NSView {
     // MARK: - Slot content
 
     private enum SlotContent {
-        case text(NSAttributedString)
-        case image(NSImage)
+        case text(NSAttributedString, layoutHeight: CGFloat)
+        case image(NSImage, layoutHeight: CGFloat)
 
-        var size: NSSize {
+        var drawSize: NSSize {
             switch self {
-            case .text(let text): return text.size()
-            case .image(let image): return image.size
+            case .text(let text, _): return text.size()
+            case .image(let image, _): return image.size
             }
         }
 
-        func draw(at origin: NSPoint) {
+        var layoutHeight: CGFloat {
             switch self {
-            case .text(let text):
+            case .text(_, let height): return height
+            case .image(_, let height): return height
+            }
+        }
+
+        func draw(centeredAt center: NSPoint) {
+            switch self {
+            case .text(let text, _):
+                let size = text.size()
                 text.draw(
                     in: NSRect(
-                        x: origin.x,
-                        y: origin.y,
-                        width: text.size().width,
-                        height: text.size().height
+                        x: center.x - size.width / 2,
+                        y: center.y - size.height / 2,
+                        width: size.width,
+                        height: size.height
                     )
                 )
-            case .image(let image):
+            case .image(let image, _):
                 image.draw(
                     in: NSRect(
-                        x: origin.x,
-                        y: origin.y,
+                        x: center.x - image.size.width / 2,
+                        y: center.y - image.size.height / 2,
                         width: image.size.width,
                         height: image.size.height
                     ),
@@ -350,24 +496,29 @@ final class StatusItemView: NSView {
         if let symbolName = segment.symbolName {
             guard let image = tintedSymbol(
                 named: symbolName,
-                pointSize: modulePointSize,
+                pointSize: effectiveIconPointSize,
                 tint: segment.tint
             ) else {
                 return nil
             }
-            return .image(image)
+            return .image(
+                image,
+                layoutHeight: symbolInkHeight(
+                    named: symbolName,
+                    pointSize: effectiveIconPointSize
+                )
+            )
         }
 
         if let letter = segment.letter, !letter.isEmpty {
-            return .text(
-                NSAttributedString(
-                    string: letter,
-                    attributes: [
-                        .font: letterFont,
-                        .foregroundColor: segment.tint
-                    ]
-                )
+            let text = NSAttributedString(
+                string: letter,
+                attributes: [
+                    .font: letterFont,
+                    .foregroundColor: segment.tint
+                ]
             )
+            return .text(text, layoutHeight: Self.glyphHeight(of: text))
         }
 
         return nil
@@ -375,8 +526,8 @@ final class StatusItemView: NSView {
 
     private func mainImage() -> NSImage? {
         tintedSymbol(
-            named: "gauge.with.dots.needle.50percent",
-            pointSize: mainPointSize,
+            named: mainSymbolName,
+            pointSize: effectiveMainPointSize,
             tint: mainTint
         )
     }
@@ -404,6 +555,76 @@ final class StatusItemView: NSView {
         tinted.isTemplate = false
         cachedSymbols[key] = tinted
         return tinted
+    }
+
+    private func symbolInkHeight(named name: String, pointSize: CGFloat) -> CGFloat {
+        let key = "\(name)|\(pointSize)"
+        if let cached = inkHeightCache[key] {
+            return cached
+        }
+
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+            ) else {
+            return pointSize
+        }
+
+        let ink = Self.inkHeight(of: base)
+        inkHeightCache[key] = ink
+        return ink
+    }
+
+    // MARK: - Metrics helpers
+
+    private static func glyphHeight(of text: NSAttributedString) -> CGFloat {
+        let line = CTLineCreateWithAttributedString(text)
+        let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        return bounds.height > 0 ? bounds.height : text.size().height
+    }
+
+    private static func inkHeight(of image: NSImage) -> CGFloat {
+        let scale: CGFloat = 2
+        let width = max(1, Int(ceil(image.size.width * scale)))
+        let height = max(1, Int(ceil(image.size.height * scale)))
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: width * 4,
+            bitsPerPixel: 32
+        ) else {
+            return image.size.height
+        }
+
+        let previousContext = NSGraphicsContext.current
+        if let context = NSGraphicsContext(bitmapImageRep: rep) {
+            NSGraphicsContext.current = context
+            NSColor.clear.setFill()
+            NSRect(x: 0, y: 0, width: width, height: height).fill()
+            image.draw(in: NSRect(x: 0, y: 0, width: width, height: height))
+        }
+        NSGraphicsContext.current = previousContext
+
+        guard let data = rep.bitmapData else { return image.size.height }
+        var minY = height
+        var maxY = -1
+        for y in 0..<height {
+            let row = y * rep.bytesPerRow
+            for x in 0..<width {
+                if data[row + x * 4 + 3] > 13 {
+                    minY = min(minY, y)
+                    maxY = max(maxY, y)
+                }
+            }
+        }
+        guard maxY >= minY else { return image.size.height }
+        return CGFloat(maxY - minY + 1) / scale
     }
 
     // MARK: - Interaction

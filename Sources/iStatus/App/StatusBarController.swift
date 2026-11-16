@@ -259,7 +259,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         var segments: [StatusItemView.Segment] = []
         var summary: [String] = []
 
-        for module in MetricModule.allCases where settings.config[module] {
+        for module in settings.config.orderedModules where settings.config[module] {
             let payload = payload(for: module)
             let showsSlot = style != .valueOnly && settings.config.showsIcon(module)
             segments.append(
@@ -285,6 +285,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             iconPosition: settings.config.iconPosition,
             mainIconVisible: settings.config.showMainIcon,
             mainTint: base,
+            fontSize: CGFloat(settings.config.barFontSize),
+            iconSize: CGFloat(settings.config.barIconSize),
+            mainIconSize: CGFloat(settings.config.mainIconPointSize),
             tooltip: tooltip
         )
 

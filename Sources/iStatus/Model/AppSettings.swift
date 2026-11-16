@@ -189,12 +189,45 @@ struct AppConfig: Codable, Equatable {
     var menuBarStyle: MenuBarStyle = .iconValue
     var iconPosition: MenuBarIconPosition = .top
     var moduleIcons: [String: Bool] = [:]
+    var moduleOrder: [String] = AppConfig.defaultModuleOrder
+    var barFontSize: Double = 9.0
+    var barIconSize: Double = 8.0
     var refreshInterval: Double = 1.0
     var temperatureUnit: TemperatureUnit = .celsius
     var statusBarColorMode: StatusBarColorMode = .automatic
     var customStatusBarColor: StatusBarColor = .defaultColor
 
+    static let barFontSizeRange: ClosedRange<Double> = 7.0...32.0
+    static let barIconSizeRange: ClosedRange<Double> = 6.0...32.0
+    static let defaultModuleOrder = MetricModule.allCases.map(\.rawValue)
+
     init() {}
+
+    /// All configured modules in their saved order. Unknown or duplicate entries
+    /// are dropped and any newly added modules are appended at the end.
+    var orderedModules: [MetricModule] {
+        var seen = Set<String>()
+        var result: [MetricModule] = []
+
+        for rawValue in moduleOrder {
+            guard let module = MetricModule(rawValue: rawValue), !seen.contains(rawValue) else {
+                continue
+            }
+            seen.insert(rawValue)
+            result.append(module)
+        }
+
+        for module in MetricModule.allCases where !seen.contains(module.rawValue) {
+            result.append(module)
+        }
+        return result
+    }
+
+    /// The main gauge is drawn larger than module icons, but follows the same slider.
+    var mainIconPointSize: Double {
+        let scaled = min(max(barIconSize * 1.6, 8), 32)
+        return (scaled * 2).rounded() / 2
+    }
 
     func showsIcon(_ module: MetricModule) -> Bool {
         moduleIcons[module.rawValue] ?? true
@@ -216,6 +249,9 @@ struct AppConfig: Codable, Equatable {
         case menuBarStyle
         case iconPosition
         case moduleIcons
+        case moduleOrder
+        case barFontSize
+        case barIconSize
         case refreshInterval
         case temperatureUnit
         case statusBarColorMode
@@ -235,6 +271,9 @@ struct AppConfig: Codable, Equatable {
         menuBarStyle = try container.decodeIfPresent(MenuBarStyle.self, forKey: .menuBarStyle) ?? .iconValue
         iconPosition = try container.decodeIfPresent(MenuBarIconPosition.self, forKey: .iconPosition) ?? .top
         moduleIcons = try container.decodeIfPresent([String: Bool].self, forKey: .moduleIcons) ?? [:]
+        moduleOrder = try container.decodeIfPresent([String].self, forKey: .moduleOrder) ?? Self.defaultModuleOrder
+        barFontSize = try container.decodeIfPresent(Double.self, forKey: .barFontSize) ?? 9.0
+        barIconSize = try container.decodeIfPresent(Double.self, forKey: .barIconSize) ?? 8.0
         refreshInterval = try container.decodeIfPresent(Double.self, forKey: .refreshInterval) ?? 1.0
         temperatureUnit = try container.decodeIfPresent(TemperatureUnit.self, forKey: .temperatureUnit) ?? .celsius
         statusBarColorMode = try container.decodeIfPresent(StatusBarColorMode.self, forKey: .statusBarColorMode) ?? .automatic

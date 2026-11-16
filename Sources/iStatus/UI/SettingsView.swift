@@ -10,7 +10,9 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 modulesSection
+                reorderSection
                 displaySection
+                sizeSection
                 colorSection
                 refreshSection
                 temperatureSection
@@ -78,6 +80,99 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Module order
+
+    private var reorderSection: some View {
+        let enabled = settings.config.orderedModules.filter { settings.config[$0] }
+
+        return SettingsSection(title: "模块顺序") {
+            VStack(alignment: .leading, spacing: 5) {
+                if enabled.count < 2 {
+                    Text("至少启用两个模块后，可在这里调整它们在状态栏中的前后顺序。")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(Array(enabled.enumerated()), id: \.element.id) { index, module in
+                        HStack(spacing: 7) {
+                            Text("\(index + 1)")
+                                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 12, alignment: .trailing)
+
+                            Image(systemName: module.symbol)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(AppTheme.blue)
+                                .frame(width: 16)
+
+                            Text(module.title)
+                                .font(.system(size: 10.5, weight: .medium))
+
+                            Spacer(minLength: 0)
+
+                            orderButton(systemName: "chevron.up", enabled: index > 0) {
+                                move(module, by: -1)
+                            }
+                            orderButton(systemName: "chevron.down", enabled: index < enabled.count - 1) {
+                                move(module, by: 1)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(0.05))
+                        )
+                    }
+
+                    Text("用上下箭头调整已启用模块的前后顺序，修改会立即应用到菜单栏。")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func orderButton(
+        systemName: String,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 9, weight: .semibold))
+                .frame(width: 22, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color.primary.opacity(enabled ? 0.09 : 0.03))
+        )
+        .foregroundStyle(enabled ? Color.primary.opacity(0.85) : Color.secondary.opacity(0.3))
+        .disabled(!enabled)
+    }
+
+    private func move(_ module: MetricModule, by offset: Int) {
+        let enabled = settings.config.orderedModules.filter { settings.config[$0] }
+        guard let from = enabled.firstIndex(of: module) else { return }
+        let to = from + offset
+        guard enabled.indices.contains(to) else { return }
+        let target = enabled[to]
+
+        // Swap the two modules in the full order so disabled modules keep their
+        // relative position and reappear where expected when enabled again.
+        var fullOrder = settings.config.orderedModules.map(\.rawValue)
+        guard let first = fullOrder.firstIndex(of: module.rawValue),
+              let second = fullOrder.firstIndex(of: target.rawValue) else {
+            return
+        }
+        fullOrder.swapAt(first, second)
+        settings.config.moduleOrder = fullOrder
     }
 
     // MARK: - Display style
@@ -160,13 +255,84 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Sizes
+
+    private var sizeSection: some View {
+        SettingsSection(title: "状态栏大小") {
+            VStack(alignment: .leading, spacing: 12) {
+                sizeRow(
+                    title: "数值字体大小",
+                    value: $settings.config.barFontSize,
+                    range: AppConfig.barFontSizeRange
+                )
+
+                sizeRow(
+                    title: "图标大小",
+                    value: $settings.config.barIconSize,
+                    range: AppConfig.barIconSizeRange
+                )
+                .disabled(!iconSizeActive)
+                .opacity(iconSizeActive ? 1 : 0.45)
+
+                Text("滑块拖动即时生效；图标大小同时影响默认仪表图标。菜单栏高度有限，过大的图标会自动缩小；上下排列时字体和图标共享高度，需要同时放大请使用左/右排列。")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var iconSizeActive: Bool {
+        settings.config.menuBarStyle != .valueOnly || settings.config.showMainIcon
+    }
+
+    private func sizeRow(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+                Spacer(minLength: 0)
+                Text(String(format: "%.1f pt", value.wrappedValue))
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+
+            HStack(spacing: 7) {
+                Text("小")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+                Slider(
+                    value: Binding(
+                        get: { value.wrappedValue },
+                        set: { value.wrappedValue = ($0 * 2).rounded() / 2 }
+                    ),
+                    in: range
+                )
+                .controlSize(.small)
+                Text("大")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
     /// A small preview that mirrors the merged status item, including the icon
-    /// position and per-module icon switches.
+    /// position and per-module icon switches. Large sizes are scaled down so the
+    /// preview stays usable while preserving their relative proportions.
     private var barPreview: some View {
-        HStack(spacing: 7) {
+        let scale = previewScale
+        return HStack(spacing: 7) {
             if settings.config.showMainIcon {
                 Image(systemName: "gauge.with.dots.needle.50percent")
-                    .font(.system(size: 9, weight: .regular))
+                    .font(.system(
+                        size: CGFloat(settings.config.mainIconPointSize) * 0.7 * scale,
+                        weight: .regular
+                    ))
             }
 
             ForEach(MetricModule.allCases) { module in
@@ -194,19 +360,33 @@ struct SettingsView: View {
         )
     }
 
+    private var previewScale: CGFloat {
+        let largest = max(settings.config.barFontSize, settings.config.barIconSize)
+        return largest > 14 ? CGFloat(14 / largest) : 1
+    }
+
     @ViewBuilder
     private func previewCell(for module: MetricModule) -> some View {
         let style = settings.config.menuBarStyle
         let showsSlot = style != .valueOnly && settings.config.showsIcon(module)
+        let scale = previewScale
         let value = Text(previewValue(for: module))
-            .font(.system(size: 8, weight: .medium, design: .monospaced))
+            .font(.system(
+                size: CGFloat(settings.config.barFontSize) * scale,
+                weight: .medium,
+                design: .monospaced
+            ))
 
         if showsSlot {
             if style == .letterValue {
                 arrangedPreview(
                     slot: AnyView(
                         Text(module.letter)
-                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                            .font(.system(
+                                size: CGFloat(max(6, settings.config.barFontSize - 0.5)) * scale,
+                                weight: .medium,
+                                design: .monospaced
+                            ))
                     ),
                     value: value
                 )
@@ -214,7 +394,10 @@ struct SettingsView: View {
                 arrangedPreview(
                     slot: AnyView(
                         Image(systemName: module.symbol)
-                            .font(.system(size: 8, weight: .regular))
+                            .font(.system(
+                                size: CGFloat(settings.config.barIconSize) * scale,
+                                weight: .regular
+                            ))
                     ),
                     value: value
                 )

@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:istatus}",
+            "name": "Debug iStatus",
+            "target": "iStatus",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug iStatus"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:istatus}",
+            "name": "Release iStatus",
+            "target": "iStatus",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release iStatus"
+        }
+    ]
+}

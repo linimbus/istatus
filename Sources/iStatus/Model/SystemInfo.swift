@@ -10,7 +10,7 @@ enum SystemInfo {
     static let totalMemory = ProcessInfo.processInfo.physicalMemory
     static let hostname = ProcessInfo.processInfo.hostName
         .replacingOccurrences(of: ".local", with: "")
-    static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.1.1"
+    static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.1.2"
 
     static let modelName: String = {
         // The friendly name is exposed by the IODeviceTree `product` node.

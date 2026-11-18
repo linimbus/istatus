@@ -37,13 +37,13 @@ final class StatusItemView: NSView {
     private var effectiveLetterFontSize: CGFloat = 8.5
     private var valueGlyphHeight: CGFloat = 7
 
-    private var valueFont: NSFont {
-        NSFont.monospacedSystemFont(ofSize: valueFontSize, weight: .medium)
-    }
-
-    private var letterFont: NSFont {
-        NSFont.monospacedSystemFont(ofSize: effectiveLetterFontSize, weight: .medium)
-    }
+    /// Fonts are cached and only recreated when the user changes a size. Asking
+    /// the system for a new UI font on every draw can return a bad font object
+    /// after long uptimes; CoreText then throws "attempt to insert nil object"
+    /// while building its attribute dictionary during menu-bar snapshot drawing.
+    /// Reusing a descriptor created once also avoids repeated system-font lookups.
+    private var valueFont = StatusItemView.monospacedFont(ofSize: 9)
+    private var letterFont = StatusItemView.monospacedFont(ofSize: 8.5)
 
     private let outerPadding: CGFloat = 4
     private let segmentGap: CGFloat = 7
@@ -51,6 +51,7 @@ final class StatusItemView: NSView {
     private let verticalGap: CGFloat = 0.5
 
     private var segments: [Segment] = []
+    private var preparedSegments: [PreparedSegment] = []
     private var iconPosition: MenuBarIconPosition = .top
     private var mainIconVisible = true
     private var mainTint: NSColor = .labelColor
@@ -59,6 +60,38 @@ final class StatusItemView: NSView {
     private var lastSizingSignature = ""
     private var cachedSymbols: [String: NSImage] = [:]
     private var inkHeightCache: [String: CGFloat] = [:]
+
+    private struct TextRun {
+        let text: NSAttributedString
+        let size: NSSize
+        let glyphHeight: CGFloat
+    }
+
+    private enum Slot {
+        case text(TextRun)
+        case image(NSImage, inkHeight: CGFloat)
+
+        var width: CGFloat {
+            switch self {
+            case .text(let run): return run.size.width
+            case .image(let image, _): return image.size.width
+            }
+        }
+
+        var layoutHeight: CGFloat {
+            switch self {
+            case .text(let run): return run.glyphHeight
+            case .image(_, let inkHeight): return inkHeight
+            }
+        }
+    }
+
+    private struct PreparedSegment {
+        let value: TextRun
+        let leadingWidth: CGFloat
+        let slot: Slot?
+        let cellWidth: CGFloat
+    }
 
     override var isFlipped: Bool { false }
 
@@ -132,25 +165,34 @@ final class StatusItemView: NSView {
         self.iconPosition = iconPosition
         self.mainIconVisible = mainIconVisible
         self.mainTint = mainTint
-        self.valueFontSize = fontSize
         self.iconPointSize = iconSize
         self.mainPointSize = mainIconSize
 
+        let clampedFontSize = fontSize.isFinite ? min(max(fontSize, 4), 64) : 9
+        if abs(valueFontSize - clampedFontSize) > 0.001 {
+            valueFontSize = clampedFontSize
+            valueFont = Self.monospacedFont(ofSize: clampedFontSize)
+        }
+
         let bandHeight = layoutHeight
-        let sizingSignature = "\(iconPosition.rawValue)|\(fontSize)|\(iconSize)|\(mainIconSize)|\(mainIconVisible)|\(bandHeight)|"
+        let sizingSignature = "\(iconPosition.rawValue)|\(clampedFontSize)|\(iconSize)|\(mainIconSize)|\(mainIconVisible)|\(bandHeight)|"
             + segments.map { "\($0.symbolName ?? "")|\($0.letter ?? "")" }.joined(separator: ";")
         let sizingChanged = sizingSignature != lastSizingSignature
         if sizingChanged {
             lastSizingSignature = sizingSignature
-            valueGlyphHeight = Self.glyphHeight(
-                of: NSAttributedString(
-                    string: "↓999M ↑999M",
-                    attributes: [.font: valueFont]
-                )
-            )
+            valueGlyphHeight = Self.glyphHeight(of: "↓999M ↑999M", font: valueFont)
             effectiveIconPointSize = fittedIconPointSize(band: bandHeight)
-            effectiveLetterFontSize = fittedLetterFontSize(band: bandHeight)
+            let letterSize = fittedLetterFontSize(band: bandHeight)
+            if abs(letterSize - effectiveLetterFontSize) > 0.001 {
+                effectiveLetterFontSize = letterSize
+                letterFont = Self.monospacedFont(ofSize: letterSize)
+            }
             effectiveMainPointSize = fittedMainPointSize(band: bandHeight)
+        }
+
+        if changed || sizingChanged {
+            rebuildPreparedSegments()
+            needsDisplay = true
         }
 
         if self.toolTip != tooltip {
@@ -163,10 +205,6 @@ final class StatusItemView: NSView {
             .joined(separator: "，")
         if (accessibilityValue() as? String) != valueText {
             setAccessibilityValue(valueText)
-        }
-
-        if changed || sizingChanged {
-            needsDisplay = true
         }
     }
 
@@ -237,19 +275,104 @@ final class StatusItemView: NSView {
 
     private func letterHeight(at pointSize: CGFloat) -> CGFloat {
         Self.glyphHeight(
-            of: NSAttributedString(
-                string: "M",
-                attributes: [
-                    .font: NSFont.monospacedSystemFont(ofSize: pointSize, weight: .medium)
-                ]
-            )
+            of: "M",
+            font: Self.monospacedFont(ofSize: pointSize)
         )
     }
+
+    // MARK: - Preparing text
+
+    /// Measure all text once while preparing instead of inside draw. AppKit's
+    /// delayed status-item snapshot calls draw from `cacheDisplay`; measuring
+    /// text there is where CoreText used to throw for a bad font object.
+    private func rebuildPreparedSegments() {
+        preparedSegments = segments.map { segment in
+            let value = makeTextRun(
+                segment.value,
+                font: valueFont,
+                tint: segment.tint
+            )
+            let slot = makeSlot(for: segment)
+            let leadingWidth = CGFloat(Self.leadingSpaceCount(of: segment.value))
+                * valueFont.maximumAdvancement.width
+
+            let cellWidth: CGFloat
+            if let slot {
+                switch iconPosition {
+                case .top, .bottom:
+                    cellWidth = max(value.size.width, slot.width)
+                case .left, .right:
+                    cellWidth = slot.width + inlineGap + value.size.width
+                }
+            } else {
+                cellWidth = value.size.width
+            }
+
+            return PreparedSegment(
+                value: value,
+                leadingWidth: leadingWidth,
+                slot: slot,
+                cellWidth: cellWidth
+            )
+        }
+    }
+
+    private func makeTextRun(_ text: String, font: NSFont, tint: NSColor) -> TextRun {
+        let attributed = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: font,
+                .foregroundColor: tint
+            ]
+        )
+        // Measure once while preparing, not while AppKit is taking its delayed
+        // status-item snapshot. That snapshot is where CoreText used to throw.
+        let size = attributed.size()
+        let glyphHeight = Self.glyphHeight(of: text, font: font)
+        return TextRun(text: attributed, size: size, glyphHeight: glyphHeight)
+    }
+
+    private func makeSlot(for segment: Segment) -> Slot? {
+        if let symbolName = segment.symbolName {
+            guard let image = tintedSymbol(
+                named: symbolName,
+                pointSize: effectiveIconPointSize,
+                tint: segment.tint
+            ) else {
+                return nil
+            }
+            return .image(
+                image,
+                inkHeight: symbolInkHeight(
+                    named: symbolName,
+                    pointSize: effectiveIconPointSize
+                )
+            )
+        }
+
+        if let letter = segment.letter, !letter.isEmpty {
+            let run = makeTextRun(letter, font: letterFont, tint: segment.tint)
+            return .text(run)
+        }
+
+        return nil
+    }
+
+    private static func leadingSpaceCount(of string: String) -> Int {
+        var count = 0
+        for character in string {
+            guard character == " " else { break }
+            count += 1
+        }
+        return count
+    }
+
+    // MARK: - Width
 
     /// Width needed to render every segment without clipping. Values use fixed-width
     /// strings, so this only changes when the user changes modules or layout.
     var preferredWidth: CGFloat {
-        guard mainIconVisible || !segments.isEmpty else { return 0 }
+        guard mainIconVisible || !preparedSegments.isEmpty else { return 0 }
 
         var total = outerPadding * 2
         var hasContent = false
@@ -259,11 +382,11 @@ final class StatusItemView: NSView {
             hasContent = true
         }
 
-        for segment in segments {
+        for prepared in preparedSegments {
             if hasContent {
                 total += segmentGap
             }
-            total += cellWidth(for: segment)
+            total += prepared.cellWidth
             hasContent = true
         }
 
@@ -298,231 +421,118 @@ final class StatusItemView: NSView {
             hasContent = true
         }
 
-        for segment in segments {
+        for prepared in preparedSegments {
             if hasContent {
                 x += segmentGap
             }
-            let width = cellWidth(for: segment)
-            draw(segment, in: NSRect(x: x, y: band.minY, width: width, height: band.height))
-            x += width
+            draw(prepared, in: NSRect(x: x, y: band.minY, width: prepared.cellWidth, height: band.height))
+            x += prepared.cellWidth
             hasContent = true
         }
     }
 
-    private func draw(_ segment: Segment, in rect: NSRect) {
-        let value = attributedValue(segment)
-        let lineSize = value.size()
-        let slot = slotContent(for: segment)
+    private func draw(_ prepared: PreparedSegment, in rect: NSRect) {
+        let value = prepared.value
 
-        guard let slot else {
-            draw(
-                value,
-                size: lineSize,
-                at: NSPoint(
-                    x: rect.midX - lineSize.width / 2,
-                    y: rect.midY - lineSize.height / 2
-                )
-            )
+        guard let slot = prepared.slot else {
+            drawRun(value, centeredAtX: rect.midX, centerY: rect.midY)
             return
         }
 
         switch iconPosition {
         case .top:
-            let contentHeight = valueGlyphHeight + verticalGap + slot.layoutHeight
+            let contentHeight = value.glyphHeight + verticalGap + slot.layoutHeight
             let y = rect.minY + max(0, (rect.height - contentHeight) / 2)
-            draw(
+            drawRun(
                 value,
-                size: lineSize,
-                at: NSPoint(
-                    x: rect.midX - lineSize.width / 2,
-                    y: y + valueGlyphHeight / 2 - lineSize.height / 2
-                )
+                centeredAtX: rect.midX,
+                centerY: y + value.glyphHeight / 2
             )
-            slot.draw(
+            drawSlot(
+                slot,
                 centeredAt: NSPoint(
                     x: rect.midX,
-                    y: y + valueGlyphHeight + verticalGap + slot.layoutHeight / 2
+                    y: y + value.glyphHeight + verticalGap + slot.layoutHeight / 2
                 )
             )
 
         case .bottom:
-            let contentHeight = valueGlyphHeight + verticalGap + slot.layoutHeight
+            let contentHeight = value.glyphHeight + verticalGap + slot.layoutHeight
             let y = rect.minY + max(0, (rect.height - contentHeight) / 2)
-            slot.draw(
+            drawSlot(
+                slot,
                 centeredAt: NSPoint(x: rect.midX, y: y + slot.layoutHeight / 2)
             )
-            draw(
+            drawRun(
                 value,
-                size: lineSize,
-                at: NSPoint(
-                    x: rect.midX - lineSize.width / 2,
-                    y: y + slot.layoutHeight + verticalGap + valueGlyphHeight / 2 - lineSize.height / 2
-                )
+                centeredAtX: rect.midX,
+                centerY: y + slot.layoutHeight + verticalGap + value.glyphHeight / 2
             )
 
         case .left:
-            let slotSize = slot.drawSize
-            let contentWidth = slotSize.width + inlineGap + lineSize.width
+            let contentWidth = slot.width + inlineGap + value.size.width
             let x = rect.minX + max(0, (rect.width - contentWidth) / 2)
-            slot.draw(centeredAt: NSPoint(x: x + slotSize.width / 2, y: rect.midY))
-            // The fixed-width value may start with spaces. Shift the box left by
-            // that blank width so the visible gap after the icon stays constant.
-            let leading = leadingSpaceWidth(of: segment.value, font: valueFont)
-            draw(
+            drawSlot(
+                slot,
+                centeredAt: NSPoint(x: x + slot.width / 2, y: rect.midY)
+            )
+            // Fixed-width values can start with blank cells. Shift the advance
+            // origin left by that blank width so the visible gap stays constant.
+            drawRun(
                 value,
-                size: lineSize,
-                at: NSPoint(
-                    x: x + slotSize.width + inlineGap - leading,
-                    y: rect.midY - lineSize.height / 2
-                )
+                atX: x + slot.width + inlineGap - prepared.leadingWidth,
+                centerY: rect.midY
             )
 
         case .right:
-            let slotSize = slot.drawSize
-            let contentWidth = lineSize.width + inlineGap + slotSize.width
+            let contentWidth = value.size.width + inlineGap + slot.width
             let x = rect.minX + max(0, (rect.width - contentWidth) / 2)
-            draw(
-                value,
-                size: lineSize,
-                at: NSPoint(x: x, y: rect.midY - lineSize.height / 2)
-            )
-            slot.draw(
+            drawRun(value, atX: x, centerY: rect.midY)
+            drawSlot(
+                slot,
                 centeredAt: NSPoint(
-                    x: x + lineSize.width + inlineGap + slotSize.width / 2,
+                    x: x + value.size.width + inlineGap + slot.width / 2,
                     y: rect.midY
                 )
             )
         }
     }
 
-    private func draw(_ text: NSAttributedString, size: NSSize, at origin: NSPoint) {
-        text.draw(
+    private func drawSlot(_ slot: Slot, centeredAt center: NSPoint) {
+        switch slot {
+        case .text(let run):
+            drawRun(run, centeredAtX: center.x, centerY: center.y)
+        case .image(let image, _):
+            image.draw(
+                in: NSRect(
+                    x: center.x - image.size.width / 2,
+                    y: center.y - image.size.height / 2,
+                    width: image.size.width,
+                    height: image.size.height
+                ),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1
+            )
+        }
+    }
+
+    private func drawRun(_ run: TextRun, centeredAtX centerX: CGFloat, centerY: CGFloat) {
+        drawRun(run, atX: centerX - run.size.width / 2, centerY: centerY)
+    }
+
+    private func drawRun(_ run: TextRun, atX x: CGFloat, centerY: CGFloat) {
+        run.text.draw(
             in: NSRect(
-                x: origin.x,
-                y: origin.y,
-                width: size.width,
-                height: size.height
+                x: x,
+                y: centerY - run.size.height / 2,
+                width: run.size.width,
+                height: run.size.height
             )
         )
     }
 
-    // MARK: - Layout metrics
-
-    private func cellWidth(for segment: Segment) -> CGFloat {
-        let valueWidth = attributedValue(segment).size().width
-        guard let slot = slotContent(for: segment) else {
-            return valueWidth
-        }
-
-        switch iconPosition {
-        case .top, .bottom:
-            return max(valueWidth, slot.drawSize.width)
-        case .left, .right:
-            return slot.drawSize.width + inlineGap + valueWidth
-        }
-    }
-
-    private func attributedValue(_ segment: Segment) -> NSAttributedString {
-        NSAttributedString(
-            string: segment.value,
-            attributes: [
-                .font: valueFont,
-                .foregroundColor: segment.tint
-            ]
-        )
-    }
-
-    private func leadingSpaceWidth(of string: String, font: NSFont) -> CGFloat {
-        var count = 0
-        for character in string {
-            guard character == " " else { break }
-            count += 1
-        }
-        guard count > 0 else { return 0 }
-        return String(repeating: " ", count: count)
-            .size(withAttributes: [.font: font])
-            .width
-    }
-
-    // MARK: - Slot content
-
-    private enum SlotContent {
-        case text(NSAttributedString, layoutHeight: CGFloat)
-        case image(NSImage, layoutHeight: CGFloat)
-
-        var drawSize: NSSize {
-            switch self {
-            case .text(let text, _): return text.size()
-            case .image(let image, _): return image.size
-            }
-        }
-
-        var layoutHeight: CGFloat {
-            switch self {
-            case .text(_, let height): return height
-            case .image(_, let height): return height
-            }
-        }
-
-        func draw(centeredAt center: NSPoint) {
-            switch self {
-            case .text(let text, _):
-                let size = text.size()
-                text.draw(
-                    in: NSRect(
-                        x: center.x - size.width / 2,
-                        y: center.y - size.height / 2,
-                        width: size.width,
-                        height: size.height
-                    )
-                )
-            case .image(let image, _):
-                image.draw(
-                    in: NSRect(
-                        x: center.x - image.size.width / 2,
-                        y: center.y - image.size.height / 2,
-                        width: image.size.width,
-                        height: image.size.height
-                    ),
-                    from: .zero,
-                    operation: .sourceOver,
-                    fraction: 1
-                )
-            }
-        }
-    }
-
-    private func slotContent(for segment: Segment) -> SlotContent? {
-        if let symbolName = segment.symbolName {
-            guard let image = tintedSymbol(
-                named: symbolName,
-                pointSize: effectiveIconPointSize,
-                tint: segment.tint
-            ) else {
-                return nil
-            }
-            return .image(
-                image,
-                layoutHeight: symbolInkHeight(
-                    named: symbolName,
-                    pointSize: effectiveIconPointSize
-                )
-            )
-        }
-
-        if let letter = segment.letter, !letter.isEmpty {
-            let text = NSAttributedString(
-                string: letter,
-                attributes: [
-                    .font: letterFont,
-                    .foregroundColor: segment.tint
-                ]
-            )
-            return .text(text, layoutHeight: Self.glyphHeight(of: text))
-        }
-
-        return nil
-    }
+    // MARK: - Fonts and symbols
 
     private func mainImage() -> NSImage? {
         tintedSymbol(
@@ -577,10 +587,32 @@ final class StatusItemView: NSView {
 
     // MARK: - Metrics helpers
 
-    private static func glyphHeight(of text: NSAttributedString) -> CGFloat {
-        let line = CTLineCreateWithAttributedString(text)
+    private static let monospacedDescriptor: NSFontDescriptor = {
+        NSFont.monospacedSystemFont(ofSize: 9, weight: .medium).fontDescriptor
+    }()
+
+    private static func monospacedFont(ofSize size: CGFloat) -> NSFont {
+        let clamped = size.isFinite ? min(max(size, 4), 64) : 9
+        if let font = NSFont(descriptor: monospacedDescriptor, size: clamped) {
+            return font
+        }
+        // Never build attributed strings with a nil/broken font. Menlo is a
+        // stable monospaced fallback; systemFont is the last resort.
+        return NSFont(name: "Menlo", size: clamped)
+            ?? NSFont.systemFont(ofSize: clamped, weight: .medium)
+    }
+
+    private static func glyphHeight(of string: String, font: NSFont) -> CGFloat {
+        let attributed = NSAttributedString(
+            string: string,
+            attributes: [.font: font]
+        )
+        let line = CTLineCreateWithAttributedString(attributed)
         let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
-        return bounds.height > 0 ? bounds.height : text.size().height
+        if bounds.height > 0 {
+            return bounds.height
+        }
+        return font.ascender - font.descender + font.leading
     }
 
     private static func inkHeight(of image: NSImage) -> CGFloat {
@@ -632,6 +664,9 @@ final class StatusItemView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         cachedSymbols.removeAll()
+        // Do not measure text here: appearance changes can arrive while AppKit is
+        // taking a status-item snapshot. The next sampling tick rebuilds with the
+        // new tint colors.
         needsDisplay = true
     }
 
